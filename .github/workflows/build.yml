@@ -1,0 +1,37 @@
+name: .NET 8 WPF Build
+
+on:
+  push:
+    branches: [ "develop" ]
+  pull_request:
+    branches: [ "develop" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    env:
+      Solution_Name: DesktopStacksService.sln
+      Project_Path: DesktopStacksService.csproj
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 8 SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Restore NuGet packages
+      run: dotnet restore ${{ env.Solution_Name }}
+
+    - name: Build the solution
+      run: dotnet build ${{ env.Solution_Name }} --configuration Release --no-restore
+
+    - name: Upload build output
+      uses: actions/upload-artifact@v4
+      with:
+        name: WPF Build - Release
+        path: |
+          **/bin/Release/
