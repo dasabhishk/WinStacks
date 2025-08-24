@@ -1,0 +1,103 @@
+name: Update Contributor Leaderboard
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"   # Runs weekly
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  leaderboard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # To commit leaderboard
+      pull-requests: read   # To fetch PR reviews
+      issues: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch full history
+        run: git fetch --prune --unshallow
+
+      - name: Generate leaderboard
+        run: |
+          echo "# 📊 Contributor Leaderboard" > leaderboard.md
+          echo "" >> leaderboard.md
+          echo "| Rank | Contributor | LOC Added | LOC Removed | Commits | PR Reviews |" >> leaderboard.md
+          echo "|------|-------------|-----------|-------------|---------|------------|" >> leaderboard.md
+
+          # Build initial stats from git history
+          git log --pretty="%an,%ae" | sort | uniq > contributors.txt
+
+          while IFS=, read name email; do
+            added=$(git log --author="$email" --pretty=tformat: --numstat | awk '{add+=$1} END {print add+0}')
+            removed=$(git log --author="$email" --pretty=tformat: --numstat | awk '{del+=$2} END {print del+0}')
+            commits=$(git log --author="$email" --pretty=oneline | wc -l)
+            echo "$name <$email>,$added,$removed,$commits" >> stats.csv
+          done < contributors.txt
+
+      - name: Fetch PR Review Stats
+        id: reviews
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "" > reviews.csv
+          OWNER=$(echo "$REPO" | cut -d'/' -f1)
+          NAME=$(echo "$REPO" | cut -d'/' -f2)
+          # Fetch all PRs and their reviews using GraphQL, handling pagination
+          cursor=null
+          while :; do
+            if [ "$cursor" = "null" ]; then
+              CURSOR_PART=""
+            else
+              CURSOR_PART=", after: \"$cursor\""
+            fi
+            QUERY="query {
+              repository(owner: \"$OWNER\", name: \"$NAME\") {
+                pullRequests(first: 50, states: [OPEN, MERGED, CLOSED]$CURSOR_PART) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    reviews(first: 100) {
+                      nodes {
+                        author { login }
+                      }
+                    }
+                  }
+                }
+              }
+            }"
+            gh api graphql -f query="$QUERY" > pr_reviews.json
+            jq -r '.data.repository.pullRequests.nodes[].reviews.nodes[].author.login' pr_reviews.json >> reviews.csv
+            HAS_NEXT=$(jq -r '.data.repository.pullRequests.pageInfo.hasNextPage' pr_reviews.json)
+            if [ "$HAS_NEXT" = "true" ]; then
+              cursor=$(jq -r '.data.repository.pullRequests.pageInfo.endCursor' pr_reviews.json)
+            else
+              break
+            fi
+          done
+
+          # Count reviews per contributor
+          sort reviews.csv | uniq -c | awk '{print $2","$1}' > review_stats.csv || true
+      - name: Merge stats
+        run: |
+          echo "" >> leaderboard.md
+
+          while IFS=, read contributor added removed commits; do
+            reviews=$(grep "^$contributor," review_stats.csv | cut -d',' -f2)
+            if [ -z "$reviews" ]; then reviews=0; fi
+            echo "$contributor,$added,$removed,$commits,$reviews" >> final_stats.csv
+          done < stats.csv
+
+          # Build markdown table sorted by LOC added
+          sort -t, -k2 -nr final_stats.csv | nl -s"," | while IFS=, read rank contributor added removed commits reviews; do
+            echo "| $rank | $contributor | $added | $removed | $commits | $reviews |" >> leaderboard.md
+          done
+
+      - name: Commit leaderboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add leaderboard.md
+          git commit -m "🔄 Update contributor leaderboard" && git push || echo "No changes"
