@@ -1,52 +1,57 @@
 import git
-from collections import defaultdict
 import os
-import re
+import json
+from collections import defaultdict
 
-repo = git.Repo(".")
+REPO_PATH = os.getcwd()
+repo = git.Repo(REPO_PATH)
 
-# --- Load .mailmap if exists ---
-mailmap = {}
-mailmap_path = os.path.join(repo.working_dir, ".mailmap")
-if os.path.exists(mailmap_path):
-    with open(mailmap_path, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            # Format: Canonical Name <canonical@email> <alias@email>
-            match = re.findall(r"<([^>]+)>", line)
-            if len(match) >= 2:
-                canonical_email = match[0]
-                alias_emails = match[1:]
-                for alias in alias_emails:
-                    mailmap[alias] = canonical_email
+# Make sure .mailmap is applied (GitPython respects it if present)
+contributors = defaultdict(lambda: {
+    "loc_added": 0,
+    "loc_removed": 0,
+    "commits": 0,
+    "pr_reviews": 0
+})
 
-# --- Collect stats ---
-stats = defaultdict(lambda: {"added": 0, "removed": 0, "commits": 0, "pr_reviews": 0})
+print("🔄 Collecting contributor stats...")
 
-for commit in repo.iter_commits("main"):
-    author_email = commit.author.email
-    canonical_email = mailmap.get(author_email, author_email)
-    author_name = commit.author.name
+for commit in repo.iter_commits():
+    # Skip first commit (no parent)
+    if not commit.parents:
+        continue
 
-    key = f"{author_name} <{canonical_email}>"
+    author = commit.author.name.strip()
+    email = commit.author.email.strip()
+    contributor_key = f"{author} <{email}>"
 
-    stats[key]["commits"] += 1
-    diff = commit.stats.total
-    stats[key]["added"] += diff["insertions"]
-    stats[key]["removed"] += diff["deletions"]
+    try:
+        diff = commit.stats.total  # total = {"insertions": x, "deletions": y, "lines": z}
+        contributors[contributor_key]["loc_added"] += diff["insertions"]
+        contributors[contributor_key]["loc_removed"] += diff["deletions"]
+        contributors[contributor_key]["commits"] += 1
+    except Exception as e:
+        print(f"⚠️ Skipping commit {commit.hexsha}: {e}")
+        continue
 
-# --- Sort leaderboard ---
-sorted_stats = sorted(stats.items(), key=lambda x: x[1]["added"], reverse=True)
+# Save leaderboard data
+leaderboard = []
+for i, (contrib, stats) in enumerate(
+    sorted(contributors.items(), key=lambda x: (x[1]["loc_added"] - x[1]["loc_removed"]), reverse=True),
+    start=1
+):
+    leaderboard.append({
+        "rank": i,
+        "contributor": contrib,
+        "loc_added": stats["loc_added"],
+        "loc_removed": stats["loc_removed"],
+        "commits": stats["commits"],
+        "pr_reviews": stats["pr_reviews"]
+    })
 
-# --- Write leaderboard.md ---
-with open("leaderboard.md", "w") as f:
-    f.write("## 📊 Contributor Leaderboard\n\n")
-    f.write("| Rank | Contributor | LOC Added | LOC Removed | Commits | PR Reviews |\n")
-    f.write("|------|-------------|-----------|-------------|---------|------------|\n")
+# Output JSON for frontend to render
+output_path = os.path.join(REPO_PATH, "leaderboard.json")
+with open(output_path, "w", encoding="utf-8") as f:
+    json.dump(leaderboard, f, indent=2)
 
-    for i, (contrib, data) in enumerate(sorted_stats, 1):
-        f.write(
-            f"| {i} | {contrib} | {data['added']} | {data['removed']} | {data['commits']} | {data['pr_reviews']} |\n"
-        )
+print(f"✅ Leaderboard generated: {output_path}")
