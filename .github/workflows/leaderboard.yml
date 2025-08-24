@@ -2,21 +2,24 @@ name: Update Contributor Leaderboard
 
 on:
   schedule:
-    - cron: "0 0 * * 0"   # Runs weekly (Sunday 00:00)
-  workflow_dispatch:       # Manual trigger
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
 
 jobs:
   leaderboard:
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # Needed to push leaderboard
-      pull-requests: read   # Needed to fetch PR reviews
+      contents: write
+      pull-requests: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # needed for git log fallback
 
-      - name: Fetch contributor stats (commits + LOC)
+      - name: Try GitHub API stats
+        id: gh_stats
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -27,7 +30,24 @@ jobs:
                   | ([.weeks[].a] | add) as $added
                   | ([.weeks[].d] | add) as $removed
                   | .total as $commits
-                  | [$login, $added, $removed, $commits] | @csv' >> stats.csv
+                  | [$login, $added, $removed, $commits] | @csv' >> stats.csv || true
+
+          if [ $(wc -l < stats.csv) -le 1 ]; then
+            echo "empty=true" >> $GITHUB_OUTPUT
+          else
+            echo "empty=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Fallback with git log if API empty
+        if: steps.gh_stats.outputs.empty == 'true'
+        run: |
+          echo "login,added,removed,commits" > stats.csv
+          git log --pretty=format:'%an' | sort | uniq -c | while read count name; do
+            login=$(echo "$name" | tr -d ' ')
+            added=$(git log --author="$name" --pretty=tformat: --numstat | awk '{add+=$1} END {print add+0}')
+            removed=$(git log --author="$name" --pretty=tformat: --numstat | awk '{del+=$2} END {print del+0}')
+            echo "$login,$added,$removed,$count" >> stats.csv
+          done
 
       - name: Fetch PR review stats
         env:
@@ -48,7 +68,7 @@ jobs:
 
           > final_stats.csv
           while IFS=, read login added removed commits; do
-            if [ "$login" = "login" ]; then continue; fi  # skip header
+            if [ "$login" = "login" ]; then continue; fi
             reviews=$(grep "^$login," review_stats.csv | cut -d',' -f2)
             if [ -z "$reviews" ]; then reviews=0; fi
             echo "$login,$added,$removed,$commits,$reviews" >> final_stats.csv
