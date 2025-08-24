@@ -1,0 +1,77 @@
+name: Update Contributor Leaderboard
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"   # Runs weekly
+  workflow_dispatch:       # Manual trigger
+
+jobs:
+  leaderboard:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # To commit leaderboard
+      pull-requests: read   # To fetch PR reviews
+      issues: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch full history
+        run: git fetch --prune --unshallow
+
+      - name: Generate leaderboard
+        run: |
+          echo "# 📊 Contributor Leaderboard" > leaderboard.md
+          echo "" >> leaderboard.md
+          echo "| Rank | Contributor | LOC Added | LOC Removed | Commits | PR Reviews |" >> leaderboard.md
+          echo "|------|-------------|-----------|-------------|---------|------------|" >> leaderboard.md
+
+          # Build initial stats from git history
+          git log --pretty="%an" | sort | uniq > contributors.txt
+
+          while read contributor; do
+            added=$(git log --author="$contributor" --pretty=tformat: --numstat | awk '{add+=$1} END {print add+0}')
+            removed=$(git log --author="$contributor" --pretty=tformat: --numstat | awk '{del+=$2} END {print del+0}')
+            commits=$(git log --author="$contributor" --pretty=oneline | wc -l)
+            echo "$contributor,$added,$removed,$commits" >> stats.csv
+          done < contributors.txt
+
+      - name: Fetch PR Review Stats
+        id: reviews
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "" > reviews.csv
+          gh api -X GET repos/$REPO/pulls?state=all --paginate \
+            --jq '.[] | .number' | while read pr; do
+              gh api -X GET repos/$REPO/pulls/$pr/reviews \
+                --jq '.[] | .user.login' >> reviews.csv
+            done
+
+          # Count reviews per contributor
+          sort reviews.csv | uniq -c | awk '{print $2","$1}' > review_stats.csv || true
+
+      - name: Merge stats
+        run: |
+          echo "" >> leaderboard.md
+
+          while IFS=, read contributor added removed commits; do
+            reviews=$(grep "^$contributor," review_stats.csv | cut -d',' -f2)
+            if [ -z "$reviews" ]; then reviews=0; fi
+            echo "$contributor,$added,$removed,$commits,$reviews" >> final_stats.csv
+          done < stats.csv
+
+          # Build markdown table sorted by LOC added
+          sort -t, -k2 -nr final_stats.csv | nl -s"," | while IFS=, read rank contributor added removed commits reviews; do
+            echo "| $rank | $contributor | $added | $removed | $commits | $reviews |" >> leaderboard.md
+          done
+
+      - name: Commit leaderboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add leaderboard.md
+          git commit -m "🔄 Update contributor leaderboard" || echo "No changes"
+          git push
