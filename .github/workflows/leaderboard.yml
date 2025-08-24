@@ -44,15 +44,42 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           echo "" > reviews.csv
-          gh api -X GET repos/$REPO/pulls?state=all --paginate \
-            --jq '.[] | .number' | while read pr; do
-              gh api -X GET repos/$REPO/pulls/$pr/reviews \
-                --jq '.[] | .user.login' >> reviews.csv
-            done
+          OWNER=$(echo "$REPO" | cut -d'/' -f1)
+          NAME=$(echo "$REPO" | cut -d'/' -f2)
+          # Fetch all PRs and their reviews using GraphQL, handling pagination
+          cursor=null
+          while :; do
+            if [ "$cursor" = "null" ]; then
+              CURSOR_PART=""
+            else
+              CURSOR_PART=", after: \"$cursor\""
+            fi
+            QUERY="query {
+              repository(owner: \"$OWNER\", name: \"$NAME\") {
+                pullRequests(first: 50, states: [OPEN, MERGED, CLOSED]$CURSOR_PART) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    reviews(first: 100) {
+                      nodes {
+                        author { login }
+                      }
+                    }
+                  }
+                }
+              }
+            }"
+            gh api graphql -f query="$QUERY" > pr_reviews.json
+            jq -r '.data.repository.pullRequests.nodes[].reviews.nodes[].author.login' pr_reviews.json >> reviews.csv
+            HAS_NEXT=$(jq -r '.data.repository.pullRequests.pageInfo.hasNextPage' pr_reviews.json)
+            if [ "$HAS_NEXT" = "true" ]; then
+              cursor=$(jq -r '.data.repository.pullRequests.pageInfo.endCursor' pr_reviews.json)
+            else
+              break
+            fi
+          done
 
           # Count reviews per contributor
           sort reviews.csv | uniq -c | awk '{print $2","$1}' > review_stats.csv || true
-
       - name: Merge stats
         run: |
           echo "" >> leaderboard.md
