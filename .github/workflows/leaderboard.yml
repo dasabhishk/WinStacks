@@ -28,13 +28,13 @@ jobs:
           echo "|------|-------------|-----------|-------------|---------|------------|" >> leaderboard.md
 
           # Build initial stats from git history
-          git log --pretty="%an" | sort | uniq > contributors.txt
+          git log --pretty="%an,%ae" | sort | uniq > contributors.txt
 
-          while read contributor; do
-            added=$(git log --author="$contributor" --pretty=tformat: --numstat | awk '{add+=$1} END {print add+0}')
-            removed=$(git log --author="$contributor" --pretty=tformat: --numstat | awk '{del+=$2} END {print del+0}')
-            commits=$(git log --author="$contributor" --pretty=oneline | wc -l)
-            echo "$contributor,$added,$removed,$commits" >> stats.csv
+          while IFS=, read name email; do
+            added=$(git log --author="$email" --pretty=tformat: --numstat | awk '{add+=$1} END {print add+0}')
+            removed=$(git log --author="$email" --pretty=tformat: --numstat | awk '{del+=$2} END {print del+0}')
+            commits=$(git log --author="$email" --pretty=oneline | wc -l)
+            echo "$name <$email>,$added,$removed,$commits" >> stats.csv
           done < contributors.txt
 
       - name: Fetch PR Review Stats
