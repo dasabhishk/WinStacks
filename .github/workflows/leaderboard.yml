@@ -16,59 +16,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fetch full history
-        run: git fetch --prune --unshallow
-
-      - name: Collect commit stats (LOC + commits, normalized to GitHub login)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git log --pretty="%ae" | sort | uniq > contributors.txt
-          > stats_raw.csv
-
-          while read email; do
-            # Lookup GitHub username for this email
-            user=$(gh api "search/users?q=$email in:email" --jq ".items[0].login" 2>/dev/null || true)
-
-            # If no GitHub username found, fallback to email
-            if [ -z "$user" ]; then
-              user=$email
-            fi
-
-            # Calculate stats
-            added=$(git log --author="$email" --pretty=tformat: --numstat | awk '{add+=$1} END {print add+0}')
-            removed=$(git log --author="$email" --pretty=tformat: --numstat | awk '{del+=$2} END {print del+0}')
-            commits=$(git log --author="$email" --pretty=oneline | wc -l)
-
-            # Append to raw CSV
-            echo "$user,$added,$removed,$commits" >> stats_raw.csv
-          done < contributors.txt
-
-      - name: Merge duplicate contributors
-        run: |
-          awk -F, '{
-            key=$1;
-            added[key]+=$2;
-            removed[key]+=$3;
-            commits[key]+=$4;
-          } END {
-            for (u in added) {
-              print u","added[u]","removed[u]","commits[u]
-            }
-          }' stats_raw.csv > stats.csv
-
-      - name: Collect PR review stats
+      - name: Fetch contributor stats (commits + LOC)
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          > review_stats.csv
-          gh api -X GET repos/$REPO/pulls?state=all --paginate --jq '.[] | .number' | while read pr; do
-            gh api -X GET repos/$REPO/pulls/$pr/reviews --jq '.[] | .user.login' >> reviews_raw.txt
-          done
-          sort reviews_raw.txt | uniq -c | awk '{print $2","$1}' > review_stats.csv || true
+          echo "login,added,removed,commits" > stats.csv
+          gh api -X GET repos/$REPO/stats/contributors --paginate \
+            --jq '.[] | .author.login as $login
+                  | ([.weeks[].a] | add) as $added
+                  | ([.weeks[].d] | add) as $removed
+                  | .total as $commits
+                  | [$login, $added, $removed, $commits] | @csv' >> stats.csv
 
-      - name: Merge all stats and build leaderboard
+      - name: Fetch PR review stats
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "login,reviews" > review_stats.csv
+          gh api -X GET repos/$REPO/pulls?state=all --paginate --jq '.[].number' | while read pr; do
+            gh api -X GET repos/$REPO/pulls/$pr/reviews --jq '.[].user.login' || true
+          done | sort | uniq -c | awk '{print $2","$1}' >> review_stats.csv
+
+      - name: Merge stats + build leaderboard
         run: |
           echo "# 📊 Contributor Leaderboard" > leaderboard.md
           echo "" >> leaderboard.md
@@ -76,15 +47,15 @@ jobs:
           echo "|------|-------------|-----------|-------------|---------|------------|" >> leaderboard.md
 
           > final_stats.csv
-          while IFS=, read user added removed commits; do
-            user=$(echo "$user" | xargs) # trim
-            reviews=$(grep "^$user," review_stats.csv | cut -d',' -f2)
+          while IFS=, read login added removed commits; do
+            if [ "$login" = "login" ]; then continue; fi  # skip header
+            reviews=$(grep "^$login," review_stats.csv | cut -d',' -f2)
             if [ -z "$reviews" ]; then reviews=0; fi
-            echo "$user,$added,$removed,$commits,$reviews" >> final_stats.csv
+            echo "$login,$added,$removed,$commits,$reviews" >> final_stats.csv
           done < stats.csv
 
-          sort -t, -k2 -nr final_stats.csv | nl -s"," | while IFS=, read rank user added removed commits reviews; do
-            echo "| $rank | $user | $added | $removed | $commits | $reviews |" >> leaderboard.md
+          sort -t, -k2 -nr final_stats.csv | nl -s"," | while IFS=, read rank login added removed commits reviews; do
+            echo "| $rank | $login | $added | $removed | $commits | $reviews |" >> leaderboard.md
           done
 
       - name: Commit leaderboard
