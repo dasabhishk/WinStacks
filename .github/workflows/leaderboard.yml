@@ -2,7 +2,7 @@ name: Update Contributor Leaderboard
 
 on:
   schedule:
-    - cron: "0 0 * * 0"   # Runs weekly
+    - cron: "0 0 * * 0"   # Runs weekly (Sunday 00:00)
   workflow_dispatch:       # Manual trigger
 
 jobs:
@@ -19,20 +19,43 @@ jobs:
       - name: Fetch full history
         run: git fetch --prune --unshallow
 
-      - name: Collect commit stats (LOC + commits)
+      - name: Collect commit stats (LOC + commits, normalized to GitHub login)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git log --pretty="%ae" | sort | uniq > contributors.txt
-          > stats.csv
+          > stats_raw.csv
+
           while read email; do
-            user=$(gh api "search/users?q=$email in:email" --jq ".items[0].login" || true)
+            # Lookup GitHub username for this email
+            user=$(gh api "search/users?q=$email in:email" --jq ".items[0].login" 2>/dev/null || true)
+
+            # If no GitHub username found, fallback to email
             if [ -z "$user" ]; then
               user=$email
             fi
+
+            # Calculate stats
             added=$(git log --author="$email" --pretty=tformat: --numstat | awk '{add+=$1} END {print add+0}')
             removed=$(git log --author="$email" --pretty=tformat: --numstat | awk '{del+=$2} END {print del+0}')
             commits=$(git log --author="$email" --pretty=oneline | wc -l)
-            echo "$user,$added,$removed,$commits" >> stats.csv
+
+            # Append to raw CSV
+            echo "$user,$added,$removed,$commits" >> stats_raw.csv
           done < contributors.txt
+
+      - name: Merge duplicate contributors
+        run: |
+          awk -F, '{
+            key=$1;
+            added[key]+=$2;
+            removed[key]+=$3;
+            commits[key]+=$4;
+          } END {
+            for (u in added) {
+              print u","added[u]","removed[u]","commits[u]
+            }
+          }' stats_raw.csv > stats.csv
 
       - name: Collect PR review stats
         env:
@@ -69,5 +92,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add leaderboard.md
-          git commit -m "Update contributor leaderboard" || echo "No changes"
+          git commit -m "🔄 Update contributor leaderboard" || echo "No changes"
           git push
